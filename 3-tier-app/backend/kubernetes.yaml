@@ -1,0 +1,254 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bmi-health-tracker
+  labels:
+    name: bmi-health-tracker
+
+---
+# ConfigMap for environment variables
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bmi-backend-config
+  namespace: bmi-health-tracker
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  FRONTEND_URL: "http://localhost:5173"
+  # Add other non-sensitive configuration here
+  LOG_LEVEL: "info"
+
+---
+# Secret for sensitive data (base64 encoded)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bmi-backend-secret
+  namespace: bmi-health-tracker
+type: Opaque
+data:
+  # Replace these with your actual values encoded in base64
+  # To encode: echo -n 'value' | base64
+  DB_HOST: cG9zdGdyZXM=  # postgres
+  DB_PORT: NTQzMg==      # 5432
+  DB_NAME: Ym1pX2hlYWx0aA==  # bmi_health
+  DB_USER: Ym1pX3VzZXI=     # bmi_user
+  DB_PASSWORD: Y2hhbmdlbWU=  # changeme
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bmi-backend
+  namespace: bmi-health-tracker
+  labels:
+    app: bmi-backend
+    version: v1
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: bmi-backend
+  template:
+    metadata:
+      labels:
+        app: bmi-backend
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      containers:
+      - name: bmi-backend
+        image: bmi-health-backend:latest  # Replace with your actual image
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+        
+        # Environment variables from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: bmi-backend-config
+        
+        # Environment variables from Secret
+        env:
+        - name: DB_HOST
+          valueFrom:
+            secretKeyRef:
+              name: bmi-backend-secret
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            secretKeyRef:
+              name: bmi-backend-secret
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: bmi-backend-secret
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: bmi-backend-secret
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: bmi-backend-secret
+              key: DB_PASSWORD
+        
+        # Liveness probe - restart container if unhealthy
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Readiness probe - remove from service if not ready
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Resource requests and limits
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        
+        # Security context
+        securityContext:
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+        
+        # Volume mounts for logs (optional)
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      
+      # Volumes
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+      
+      # Pod restart policy
+      restartPolicy: Always
+      
+      # Affinity rules (optional - for multi-node clusters)
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - bmi-backend
+              topologyKey: kubernetes.io/hostname
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: bmi-backend
+  namespace: bmi-health-tracker
+  labels:
+    app: bmi-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: bmi-backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  sessionAffinity: None
+
+---
+# Optional: HorizontalPodAutoscaler for auto-scaling
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: bmi-backend-hpa
+  namespace: bmi-health-tracker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: bmi-backend
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Optional: NetworkPolicy (for security)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bmi-backend-netpol
+  namespace: bmi-health-tracker
+spec:
+  podSelector:
+    matchLabels:
+      app: bmi-backend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: bmi-health-tracker
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
